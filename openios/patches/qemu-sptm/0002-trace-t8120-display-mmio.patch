@@ -1,0 +1,235 @@
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+index 529175e..b7a7141 100644
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -23,6 +23,7 @@
+ #include "xnu/macho.h"
+ #include "hw/intc/apple_aic.h"
+ #include "hw/display/openios-test-display.h"
++#include "system/openios-display-mmio-trace.h"
+ 
+ // See device tree specification section 2.3.8: ranges
+ #define IO_RANGE_BASE_OFFSET     1
+@@ -54,6 +55,7 @@ struct DarwinState {
+     struct xnu_boot_info   bootinfo;
+     qemu_irq               irqs[DARWIN_MACHINE_NUM_IRQS];
+     bool                   test_display;
++    bool                   display_mmio_trace;
+ };
+ 
+ MACHINE_CLASS_ARG(bootkc);
+@@ -205,6 +207,9 @@ static void darwin_init(MachineState *ms) {
+     if (s->test_display) {
+         openios_test_display_create(OBJECT(ms));
+     }
++    if (s->display_mmio_trace) {
++        openios_display_mmio_trace_enable();
++    }
+ 
+     if (!info->args) info->args = g_default_args;
+     info->bootkc_f = check_and_open(info->bootkc, "error opening XNU kernel");
+@@ -313,6 +318,17 @@ static void darwin_set_test_display(Object *obj, bool value, Error **errp)
+     DARWIN_MACHINE(obj)->test_display = value;
+ }
+ 
++static bool darwin_get_display_mmio_trace(Object *obj, Error **errp)
++{
++    return DARWIN_MACHINE(obj)->display_mmio_trace;
++}
++
++static void darwin_set_display_mmio_trace(Object *obj, bool value,
++                                          Error **errp)
++{
++    DARWIN_MACHINE(obj)->display_mmio_trace = value;
++}
++
+ static void darwin_machine_init(MachineClass *mc) {
+     mc->desc = "Generic Apple Silicon Device";
+     mc->init = darwin_init;
+@@ -335,6 +351,12 @@ static void darwin_machine_class_init(ObjectClass *oc, const void *data) {
+     object_class_property_set_description(
+         oc, "test-display",
+         "Enable the host-only OpeniOS graphics test pattern console");
++    object_class_property_add_bool(oc, "display-mmio-trace",
++                                   darwin_get_display_mmio_trace,
++                                   darwin_set_display_mmio_trace);
++    object_class_property_set_description(
++        oc, "display-mmio-trace",
++        "Trace bounded unassigned accesses in T8120 display MMIO ranges");
+ 
+     darwin_machine_init(mc);
+ }
+diff --git a/include/system/openios-display-mmio-trace.h b/include/system/openios-display-mmio-trace.h
+new file mode 100644
+index 0000000..160f430
+--- /dev/null
++++ b/include/system/openios-display-mmio-trace.h
+@@ -0,0 +1,12 @@
++/*
++ * OpeniOS display MMIO tracing for unassigned physical accesses
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef SYSTEM_OPENIOS_DISPLAY_MMIO_TRACE_H
++#define SYSTEM_OPENIOS_DISPLAY_MMIO_TRACE_H
++
++void openios_display_mmio_trace_enable(void);
++
++#endif
+diff --git a/system/memory.c b/system/memory.c
+index 5fc3670..a2b50d3 100644
+--- a/system/memory.c
++++ b/system/memory.c
+@@ -14,6 +14,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "system/openios-display-mmio-trace.h"
+ #include "qemu/log.h"
+ #include "qapi/error.h"
+ #include "system/memory.h"
+@@ -29,6 +30,7 @@
+ #include "system/ramblock.h"
+ #include "system/kvm.h"
+ #include "system/runstate.h"
++#include "system/system.h"
+ #include "system/tcg.h"
+ #include "qemu/accel.h"
+ #include "accel/accel-ops.h"
+@@ -1335,9 +1337,127 @@ static void iommu_memory_region_initfn(Object *obj)
+     mr->is_iommu = true;
+ }
+ 
++#define OPENIOS_DISPLAY_MMIO_LOG_LIMIT 256
++
++typedef struct OpenIOSDisplayMMIORange {
++    const char *name;
++    hwaddr base;
++    hwaddr size;
++    uint64_t reads;
++    uint64_t writes;
++} OpenIOSDisplayMMIORange;
++
++/* Physical addresses from the iPhone15,3 arm-io device tree inventory. */
++static OpenIOSDisplayMMIORange openios_display_mmio_ranges[] = {
++    { "dart-disp0.1", 0x231300000, 0x4000 },
++    { "dart-disp0.0", 0x231304000, 0x4000 },
++    { "dart-dcp",     0x23130c000, 0x4000 },
++    { "disp0.2",      0x231320000, 0x4000 },
++    { "disp0.3",      0x231340000, 0x4000 },
++    { "disp0.4",      0x231344000, 0x4000 },
++    { "dart-dispgrt.1", 0x23134c000, 0x4000 },
++    { "dart-dispgrt.0", 0x231350000, 0x4000 },
++    { "dcp.1",        0x232850000, 0x4000 },
++    { "dcp.0",        0x232c00000, 0x6c000 },
++    { "disp0.0",      0x230000000, 0x690000 },
++    { "disp0.1",      0x230800000, 0x690000 },
++    { "disp0.5",      0x232800000, 0x800000 },
++    { "disp0.6",      0x23b3d0000, 0x4000 },
++    { "scaler0.0",    0x263000000, 0x28000 },
++    { "scaler0.2",    0x263204000, 0x4000 },
++    { "scaler0.1",    0x263210000, 0x4000 },
++    { "gfx-asc.1",    0x206050000, 0x8 },
++    { "gfx-asc.0",    0x206400000, 0x6c000 },
++};
++
++static bool openios_display_mmio_trace_enabled;
++static uint64_t openios_display_mmio_trace_logged;
++static uint64_t openios_display_mmio_trace_reads;
++static uint64_t openios_display_mmio_trace_writes;
++
++static void openios_display_mmio_trace_report(Notifier *notifier, void *data)
++{
++    size_t i;
++
++    fprintf(stderr,
++            "openios-display-mmio: summary reads=%" PRIu64
++            " writes=%" PRIu64 " detailed=%" PRIu64 "/%u\n",
++            openios_display_mmio_trace_reads,
++            openios_display_mmio_trace_writes,
++            openios_display_mmio_trace_logged,
++            OPENIOS_DISPLAY_MMIO_LOG_LIMIT);
++    for (i = 0; i < ARRAY_SIZE(openios_display_mmio_ranges); i++) {
++        OpenIOSDisplayMMIORange *range = &openios_display_mmio_ranges[i];
++
++        fprintf(stderr,
++                "openios-display-mmio: range=%s reads=%" PRIu64
++                " writes=%" PRIu64 "\n",
++                range->name, range->reads, range->writes);
++    }
++}
++
++static Notifier openios_display_mmio_trace_exit_notifier = {
++    .notify = openios_display_mmio_trace_report,
++};
++
++void openios_display_mmio_trace_enable(void)
++{
++    if (openios_display_mmio_trace_enabled) {
++        return;
++    }
++
++    openios_display_mmio_trace_enabled = true;
++    qemu_add_exit_notifier(&openios_display_mmio_trace_exit_notifier);
++    fprintf(stderr,
++            "openios-display-mmio: enabled for %zu ranges; "
++            "logging first %u unassigned accesses\n",
++            ARRAY_SIZE(openios_display_mmio_ranges),
++            OPENIOS_DISPLAY_MMIO_LOG_LIMIT);
++}
++
++static void openios_display_mmio_trace_access(hwaddr addr, uint64_t value,
++                                              unsigned size, bool is_write)
++{
++    size_t i;
++
++    if (!openios_display_mmio_trace_enabled) {
++        return;
++    }
++
++    for (i = 0; i < ARRAY_SIZE(openios_display_mmio_ranges); i++) {
++        OpenIOSDisplayMMIORange *range = &openios_display_mmio_ranges[i];
++
++        if (addr < range->base || addr - range->base >= range->size) {
++            continue;
++        }
++
++        if (is_write) {
++            range->writes++;
++            openios_display_mmio_trace_writes++;
++        } else {
++            range->reads++;
++            openios_display_mmio_trace_reads++;
++        }
++
++        if (openios_display_mmio_trace_logged <
++            OPENIOS_DISPLAY_MMIO_LOG_LIMIT) {
++            fprintf(stderr,
++                    "openios-display-mmio: #%-3" PRIu64
++                    " %s addr=0x%" HWADDR_PRIx " size=%u value=0x%" PRIx64
++                    " range=%s result=unassigned\n",
++                    openios_display_mmio_trace_logged + 1,
++                    is_write ? "write" : "read ", addr, size, value,
++                    range->name);
++            openios_display_mmio_trace_logged++;
++        }
++        return;
++    }
++}
++
+ static uint64_t unassigned_mem_read(void *opaque, hwaddr addr,
+                                     unsigned size)
+ {
++    openios_display_mmio_trace_access(addr, 0, size, false);
+ #ifdef DEBUG_UNASSIGNED
+     printf("Unassigned mem read " HWADDR_FMT_plx "\n", addr);
+ #endif
+@@ -1347,6 +1467,7 @@ static uint64_t unassigned_mem_read(void *opaque, hwaddr addr,
+ static void unassigned_mem_write(void *opaque, hwaddr addr,
+                                  uint64_t val, unsigned size)
+ {
++    openios_display_mmio_trace_access(addr, val, size, true);
+ #ifdef DEBUG_UNASSIGNED
+     printf("Unassigned mem write " HWADDR_FMT_plx " = 0x%"PRIx64"\n", addr, val);
+ #endif

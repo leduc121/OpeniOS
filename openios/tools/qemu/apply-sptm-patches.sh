@@ -20,6 +20,9 @@ if [ "$actual_rev" != "$EXPECTED_REV" ]; then
   exit 1
 fi
 
+patches=()
+declare -A touched_paths=()
+
 while IFS= read -r patch_name; do
   case "$patch_name" in
     ''|'#'*) continue ;;
@@ -31,14 +34,53 @@ while IFS= read -r patch_name; do
     exit 1
   }
 
-  if git -C "$QEMU_DIR" apply --check "$patch_path" 2>/dev/null; then
-    echo "applying $patch_name"
-    git -C "$QEMU_DIR" apply "$patch_path"
-  elif git -C "$QEMU_DIR" apply --reverse --check "$patch_path" 2>/dev/null; then
-    echo "already applied: $patch_name"
+  patches+=("$patch_path")
+  while IFS=$'\t' read -r _ _ path; do
+    touched_paths["$path"]=1
+  done < <(git apply --numstat "$patch_path")
+done < "$PATCH_DIR/series"
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+git -C "$QEMU_DIR" archive HEAD | tar -x -C "$tmpdir"
+for patch_path in "${patches[@]}"; do
+  git -C "$tmpdir" apply "$patch_path"
+done
+
+series_applied=true
+for path in "${!touched_paths[@]}"; do
+  if ! cmp -s "$tmpdir/$path" "$QEMU_DIR/$path"; then
+    series_applied=false
+    break
+  fi
+done
+
+if "$series_applied"; then
+  echo "QEMU-SPTM patch series already applied."
+  exit 0
+fi
+
+rm -rf "$tmpdir"
+mkdir -p "$tmpdir"
+git -C "$QEMU_DIR" archive HEAD | tar -x -C "$tmpdir"
+for path in "${!touched_paths[@]}"; do
+  if [ -e "$QEMU_DIR/$path" ]; then
+    mkdir -p "$tmpdir/$(dirname "$path")"
+    cp -a "$QEMU_DIR/$path" "$tmpdir/$path"
   else
-    echo "error: $patch_name is neither applicable nor fully applied" >&2
+    rm -f "$tmpdir/$path"
+  fi
+done
+
+for patch_path in "${patches[@]}"; do
+  if ! git -C "$tmpdir" apply "$patch_path"; then
+    echo "error: patch series does not apply cleanly" >&2
     echo "Preserving the QEMU-SPTM working tree unchanged." >&2
     exit 1
   fi
-done < "$PATCH_DIR/series"
+done
+
+for patch_path in "${patches[@]}"; do
+  git -C "$QEMU_DIR" apply "$patch_path"
+done
+echo "Applied ${#patches[@]} QEMU-SPTM patches."
