@@ -18,6 +18,7 @@ GTAGS
 *.depend_raw
 *.swp
 *.patch
+!openios/patches/qemu-sptm/*.patch
 *.gcov
 .cache/
 .DS_Store

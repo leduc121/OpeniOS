@@ -1,0 +1,236 @@
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+index 246476d..529175e 100644
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -22,6 +22,7 @@
+ #include "xnu/patch.h"
+ #include "xnu/macho.h"
+ #include "hw/intc/apple_aic.h"
++#include "hw/display/openios-test-display.h"
+ 
+ // See device tree specification section 2.3.8: ranges
+ #define IO_RANGE_BASE_OFFSET     1
+@@ -52,6 +53,7 @@ struct DarwinState {
+     DeviceState           *aic;
+     struct xnu_boot_info   bootinfo;
+     qemu_irq               irqs[DARWIN_MACHINE_NUM_IRQS];
++    bool                   test_display;
+ };
+ 
+ MACHINE_CLASS_ARG(bootkc);
+@@ -200,6 +202,10 @@ static void darwin_init(MachineState *ms) {
+     struct xnu_boot_info *info = &s->bootinfo;
+     struct dtree_node *dt_root;
+ 
++    if (s->test_display) {
++        openios_test_display_create(OBJECT(ms));
++    }
++
+     if (!info->args) info->args = g_default_args;
+     info->bootkc_f = check_and_open(info->bootkc, "error opening XNU kernel");
+     info->dtree_f = check_and_open(info->dtree, "error opening device tree");
+@@ -297,6 +303,16 @@ static void darwin_init(MachineState *ms) {
+     }
+ }
+ 
++static bool darwin_get_test_display(Object *obj, Error **errp)
++{
++    return DARWIN_MACHINE(obj)->test_display;
++}
++
++static void darwin_set_test_display(Object *obj, bool value, Error **errp)
++{
++    DARWIN_MACHINE(obj)->test_display = value;
++}
++
+ static void darwin_machine_init(MachineClass *mc) {
+     mc->desc = "Generic Apple Silicon Device";
+     mc->init = darwin_init;
+@@ -314,6 +330,11 @@ static void darwin_machine_class_init(ObjectClass *oc, const void *data) {
+     object_class_property_add_str(oc, "txm", txm_darwin_class_get, txm_darwin_class_set);
+     object_class_property_add_str(oc, "tc", tc_darwin_class_get, tc_darwin_class_set);
+     object_class_property_add_str(oc, "ramdisk", ramdisk_darwin_class_get, ramdisk_darwin_class_set);
++    object_class_property_add_bool(oc, "test-display", darwin_get_test_display,
++                                   darwin_set_test_display);
++    object_class_property_set_description(
++        oc, "test-display",
++        "Enable the host-only OpeniOS graphics test pattern console");
+ 
+     darwin_machine_init(mc);
+ }
+diff --git a/hw/display/meson.build b/hw/display/meson.build
+index ffecedb..db84554 100644
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -37,6 +37,7 @@ system_ss.add(when: 'CONFIG_NEXTCUBE', if_true: files('next-fb.c'))
+ system_ss.add(when: 'CONFIG_VGA', if_true: files('vga.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO', if_true: files('virtio-dmabuf.c'))
+ system_ss.add(when: 'CONFIG_DM163', if_true: files('dm163.c'))
++system_ss.add(files('openios-test-display.c'), pixman)
+ 
+ stub_ss.add([files('acpi-vga-stub.c'), pixman])
+ if (config_all_devices.has_key('CONFIG_VGA_CIRRUS') or
+diff --git a/hw/display/openios-test-display.c b/hw/display/openios-test-display.c
+new file mode 100644
+index 0000000..574606e
+--- /dev/null
++++ b/hw/display/openios-test-display.c
+@@ -0,0 +1,136 @@
++/*
++ * OpeniOS host-only graphics console prototype
++ *
++ * This device deliberately has no guest-visible interface.  It only exercises
++ * QEMU's display and pixman paths while Apple display hardware is researched.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "hw/display/openios-test-display.h"
++#include "qapi/error.h"
++#include "qemu/module.h"
++#include "ui/console.h"
++
++#define TEST_WIDTH  960
++#define TEST_HEIGHT 540
++
++OBJECT_DECLARE_SIMPLE_TYPE(OpenIOSTestDisplayState, OPENIOS_TEST_DISPLAY)
++
++struct OpenIOSTestDisplayState {
++    DeviceState parent_obj;
++    QemuConsole *console;
++};
++
++static void fill(pixman_image_t *image, int x, int y, int width, int height,
++                 uint32_t color)
++{
++    pixman_color_t c = {
++        .alpha = 0xffff,
++        .red = ((color >> 16) & 0xff) * 0x101,
++        .green = ((color >> 8) & 0xff) * 0x101,
++        .blue = (color & 0xff) * 0x101,
++    };
++    pixman_rectangle16_t rect = { x, y, width, height };
++
++    pixman_image_fill_rectangles(PIXMAN_OP_SRC, image, &c, 1, &rect);
++}
++
++static void openios_test_display_draw(OpenIOSTestDisplayState *s)
++{
++    static const uint32_t bars[] = {
++        0xf3f4f6, 0xf4d35e, 0x55d6be, 0x4ea5d9,
++        0xc77dff, 0xf26b5b, 0x273043,
++    };
++    DisplaySurface *surface = qemu_console_surface(s->console);
++    pixman_image_t *image = surface->image;
++    int bar_width = TEST_WIDTH / ARRAY_SIZE(bars);
++
++    fill(image, 0, 0, TEST_WIDTH, TEST_HEIGHT, 0x10141b);
++    for (int i = 0; i < ARRAY_SIZE(bars); i++) {
++        int x = i * bar_width;
++        int width = i == ARRAY_SIZE(bars) - 1 ? TEST_WIDTH - x : bar_width;
++
++        fill(image, x, 0, width, TEST_HEIGHT * 2 / 3, bars[i]);
++    }
++
++    for (int y = TEST_HEIGHT * 2 / 3; y < TEST_HEIGHT; y += 30) {
++        for (int x = 0; x < TEST_WIDTH; x += 30) {
++            if (((x / 30) + (y / 30)) & 1) {
++                fill(image, x, y, 30, 30, 0x252b36);
++            }
++        }
++    }
++
++    /* High-contrast registration target makes scaling errors obvious. */
++    fill(image, TEST_WIDTH / 2 - 90, TEST_HEIGHT / 2 - 12, 180, 24,
++         0xffffff);
++    fill(image, TEST_WIDTH / 2 - 12, TEST_HEIGHT / 2 - 90, 24, 180,
++         0xffffff);
++    fill(image, TEST_WIDTH / 2 - 60, TEST_HEIGHT / 2 - 6, 120, 12,
++         0x111827);
++    fill(image, TEST_WIDTH / 2 - 6, TEST_HEIGHT / 2 - 60, 12, 120,
++         0x111827);
++}
++
++static void openios_test_display_invalidate(void *opaque)
++{
++    OpenIOSTestDisplayState *s = opaque;
++
++    openios_test_display_draw(s);
++    qemu_console_update_full(s->console);
++}
++
++static bool openios_test_display_update(void *opaque)
++{
++    return true;
++}
++
++static const GraphicHwOps openios_test_display_ops = {
++    .invalidate = openios_test_display_invalidate,
++    .gfx_update = openios_test_display_update,
++};
++
++static void openios_test_display_realize(DeviceState *dev, Error **errp)
++{
++    OpenIOSTestDisplayState *s = OPENIOS_TEST_DISPLAY(dev);
++
++    s->console = qemu_graphic_console_create(dev, 0,
++                                             &openios_test_display_ops, s);
++    qemu_console_resize(s->console, TEST_WIDTH, TEST_HEIGHT);
++    openios_test_display_invalidate(s);
++}
++
++static void openios_test_display_class_init(ObjectClass *klass,
++                                            const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->desc = "OpeniOS host-only test pattern display";
++    dc->realize = openios_test_display_realize;
++    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
++}
++
++static const TypeInfo openios_test_display_info = {
++    .name = TYPE_OPENIOS_TEST_DISPLAY,
++    .parent = TYPE_DEVICE,
++    .instance_size = sizeof(OpenIOSTestDisplayState),
++    .class_init = openios_test_display_class_init,
++};
++
++static void openios_test_display_register_types(void)
++{
++    type_register_static(&openios_test_display_info);
++}
++
++type_init(openios_test_display_register_types)
++
++DeviceState *openios_test_display_create(Object *owner)
++{
++    DeviceState *dev = qdev_new(TYPE_OPENIOS_TEST_DISPLAY);
++
++    object_property_add_child(owner, "test-display-device", OBJECT(dev));
++    qdev_realize(dev, NULL, &error_fatal);
++    return dev;
++}
+diff --git a/include/hw/display/openios-test-display.h b/include/hw/display/openios-test-display.h
+new file mode 100644
+index 0000000..3646d0a
+--- /dev/null
++++ b/include/hw/display/openios-test-display.h
+@@ -0,0 +1,16 @@
++/*
++ * OpeniOS host-only test display
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_DISPLAY_OPENIOS_TEST_DISPLAY_H
++#define HW_DISPLAY_OPENIOS_TEST_DISPLAY_H
++
++#include "hw/core/qdev.h"
++
++#define TYPE_OPENIOS_TEST_DISPLAY "openios-test-display"
++
++DeviceState *openios_test_display_create(Object *owner);
++
++#endif
