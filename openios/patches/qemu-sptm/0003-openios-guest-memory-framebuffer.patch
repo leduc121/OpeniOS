@@ -1,0 +1,153 @@
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -37,7 +37,7 @@
+ system_ss.add(when: 'CONFIG_VGA', if_true: files('vga.c'))
+ system_ss.add(when: 'CONFIG_VIRTIO', if_true: files('virtio-dmabuf.c'))
+ system_ss.add(when: 'CONFIG_DM163', if_true: files('dm163.c'))
+-system_ss.add(files('openios-test-display.c'), pixman)
++system_ss.add(files('openios-test-display.c', 'openios-guest-fb.c'), pixman)
+ 
+ stub_ss.add([files('acpi-vga-stub.c'), pixman])
+ if (config_all_devices.has_key('CONFIG_VGA_CIRRUS') or
+--- /dev/null
++++ b/hw/display/openios-guest-fb.c
+@@ -0,0 +1,139 @@
++/*
++ * OpeniOS guest-physical-memory framebuffer research device
++ *
++ * This device has no MMIO interface and implements no Apple display hardware.
++ * It copies XRGB8888 pixels from a configured guest physical address into a
++ * QEMU console so that the guest-memory-to-DisplaySurface path can be tested
++ * independently of DCP, DART, GPU, and DisplayPipe register semantics.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "hw/core/qdev-properties.h"
++#include "qapi/error.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "system/address-spaces.h"
++#include "system/memory.h"
++#include "ui/console.h"
++
++#define TYPE_OPENIOS_GUEST_FB "openios-guest-fb"
++OBJECT_DECLARE_SIMPLE_TYPE(OpenIOSGuestFBState, OPENIOS_GUEST_FB)
++
++#define OPENIOS_GUEST_FB_MAX_WIDTH  4096
++#define OPENIOS_GUEST_FB_MAX_HEIGHT 4096
++
++struct OpenIOSGuestFBState {
++    DeviceState parent_obj;
++    QemuConsole *console;
++    uint64_t addr;
++    uint32_t width;
++    uint32_t height;
++    uint32_t stride;
++    bool read_failed;
++};
++
++static bool openios_guest_fb_update(void *opaque)
++{
++    OpenIOSGuestFBState *s = opaque;
++    DisplaySurface *surface = qemu_console_surface(s->console);
++    uint8_t *dst = surface_data(surface);
++    uint32_t dst_stride = surface_stride(surface);
++    MemTxResult result = MEMTX_OK;
++    uint32_t y;
++
++    for (y = 0; y < s->height; y++) {
++        result = address_space_read(&address_space_memory,
++                                    s->addr + (uint64_t)y * s->stride,
++                                    MEMTXATTRS_UNSPECIFIED,
++                                    dst + (size_t)y * dst_stride,
++                                    (size_t)s->width * 4);
++        if (result != MEMTX_OK) {
++            if (!s->read_failed) {
++                qemu_log_mask(LOG_GUEST_ERROR,
++                              "openios-guest-fb: failed to read guest "
++                              "memory at 0x%" PRIx64 "\n",
++                              s->addr + (uint64_t)y * s->stride);
++                s->read_failed = true;
++            }
++            return false;
++        }
++    }
++
++    s->read_failed = false;
++    qemu_console_update_full(s->console);
++    return true;
++}
++
++static void openios_guest_fb_invalidate(void *opaque)
++{
++    openios_guest_fb_update(opaque);
++}
++
++static const GraphicHwOps openios_guest_fb_ops = {
++    .invalidate = openios_guest_fb_invalidate,
++    .gfx_update = openios_guest_fb_update,
++};
++
++static void openios_guest_fb_realize(DeviceState *dev, Error **errp)
++{
++    OpenIOSGuestFBState *s = OPENIOS_GUEST_FB(dev);
++    uint64_t row_bytes = (uint64_t)s->width * 4;
++    uint64_t size;
++
++    if (s->width < 16 || s->width > OPENIOS_GUEST_FB_MAX_WIDTH ||
++        s->height < 16 || s->height > OPENIOS_GUEST_FB_MAX_HEIGHT) {
++        error_setg(errp, "width and height must be between 16 and 4096");
++        return;
++    }
++    if (!s->stride) {
++        s->stride = row_bytes;
++    }
++    if (s->stride < row_bytes || (s->stride & 3)) {
++        error_setg(errp, "stride must be 4-byte aligned and at least width*4");
++        return;
++    }
++
++    size = (uint64_t)s->stride * (s->height - 1) + row_bytes;
++    if (s->addr + size < s->addr) {
++        error_setg(errp, "framebuffer address range overflows");
++        return;
++    }
++
++    s->console = qemu_graphic_console_create(dev, 0,
++                                             &openios_guest_fb_ops, s);
++    qemu_console_resize(s->console, s->width, s->height);
++    openios_guest_fb_update(s);
++}
++
++static const Property openios_guest_fb_properties[] = {
++    DEFINE_PROP_UINT64("addr", OpenIOSGuestFBState, addr, 0),
++    DEFINE_PROP_UINT32("width", OpenIOSGuestFBState, width, 320),
++    DEFINE_PROP_UINT32("height", OpenIOSGuestFBState, height, 180),
++    DEFINE_PROP_UINT32("stride", OpenIOSGuestFBState, stride, 0),
++};
++
++static void openios_guest_fb_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->desc = "OpeniOS guest-memory framebuffer research console";
++    dc->realize = openios_guest_fb_realize;
++    device_class_set_props(dc, openios_guest_fb_properties);
++    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
++}
++
++static const TypeInfo openios_guest_fb_info = {
++    .name = TYPE_OPENIOS_GUEST_FB,
++    .parent = TYPE_DEVICE,
++    .instance_size = sizeof(OpenIOSGuestFBState),
++    .class_init = openios_guest_fb_class_init,
++};
++
++static void openios_guest_fb_register_types(void)
++{
++    type_register_static(&openios_guest_fb_info);
++}
++
++type_init(openios_guest_fb_register_types)

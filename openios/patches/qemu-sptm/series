@@ -1,2 +1,3 @@
 0001-openios-host-test-display.patch
 0002-trace-t8120-display-mmio.patch
+0003-openios-guest-memory-framebuffer.patch
