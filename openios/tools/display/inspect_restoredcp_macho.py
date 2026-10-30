@@ -73,6 +73,7 @@ def inspect(path: Path) -> dict[str, object]:
                 "initprot": initprot,
                 "nsects": nsects,
                 "flags": segflags,
+                "file_range_valid": fileoff + filesize <= len(data),
             })
         elif command == LC_CODE_SIGNATURE:
             if command_size < 16:
@@ -112,6 +113,15 @@ def inspect(path: Path) -> dict[str, object]:
                 "command": f"{command:#x}", "size": command_size
             })
         offset += command_size
+    ranges = sorted(
+        (int(segment["fileoff"], 16), int(segment["filesize"], 16))
+        for segment in result["segments"]
+        if int(segment["filesize"], 16)
+    )
+    result["segment_layout_valid"] = all(
+        start >= previous_start + previous_size
+        for (previous_start, previous_size), (start, _) in zip(ranges, ranges[1:])
+    ) and all(segment["file_range_valid"] for segment in result["segments"])
     return result
 
 

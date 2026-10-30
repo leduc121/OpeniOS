@@ -1,0 +1,267 @@
+diff --git a/hw/arm/darwin.c b/hw/arm/darwin.c
+index b7a714146c..1de96220e9 100644
+--- a/hw/arm/darwin.c
++++ b/hw/arm/darwin.c
+@@ -24,6 +24,8 @@
+ #include "hw/intc/apple_aic.h"
+ #include "hw/display/openios-test-display.h"
+ #include "system/openios-display-mmio-trace.h"
++#include "system/address-spaces.h"
++#include "qemu/error-report.h"
+ 
+ // See device tree specification section 2.3.8: ranges
+ #define IO_RANGE_BASE_OFFSET     1
+@@ -56,6 +58,8 @@ struct DarwinState {
+     qemu_irq               irqs[DARWIN_MACHINE_NUM_IRQS];
+     bool                   test_display;
+     bool                   display_mmio_trace;
++    bool                   display_mmio_trace_test_map;
++    MemoryRegion           *display_mmio_trace_test_region;
+ };
+ 
+ MACHINE_CLASS_ARG(bootkc);
+@@ -210,6 +214,24 @@ static void darwin_init(MachineState *ms) {
+     if (s->display_mmio_trace) {
+         openios_display_mmio_trace_enable();
+     }
++    if (s->display_mmio_trace_test_map) {
++        Error *err = NULL;
++
++        if (!s->display_mmio_trace) {
++            error_report("display-mmio-trace-test-map requires display-mmio-trace=on");
++            exit(1);
++        }
++
++        s->display_mmio_trace_test_region = g_new0(MemoryRegion, 1);
++        memory_region_init_ram(s->display_mmio_trace_test_region, NULL,
++                               "openios-display-trace-test", 0x1000, &err);
++        if (err) {
++            error_report_err(err);
++            exit(1);
++        }
++        memory_region_add_subregion(get_system_memory(), 0x232c00000,
++                                    s->display_mmio_trace_test_region);
++    }
+ 
+     if (!info->args) info->args = g_default_args;
+     info->bootkc_f = check_and_open(info->bootkc, "error opening XNU kernel");
+@@ -329,6 +351,17 @@ static void darwin_set_display_mmio_trace(Object *obj, bool value,
+     DARWIN_MACHINE(obj)->display_mmio_trace = value;
+ }
+ 
++static bool darwin_get_display_mmio_trace_test_map(Object *obj, Error **errp)
++{
++    return DARWIN_MACHINE(obj)->display_mmio_trace_test_map;
++}
++
++static void darwin_set_display_mmio_trace_test_map(Object *obj, bool value,
++                                                    Error **errp)
++{
++    DARWIN_MACHINE(obj)->display_mmio_trace_test_map = value;
++}
++
+ static void darwin_machine_init(MachineClass *mc) {
+     mc->desc = "Generic Apple Silicon Device";
+     mc->init = darwin_init;
+@@ -356,7 +389,13 @@ static void darwin_machine_class_init(ObjectClass *oc, const void *data) {
+                                    darwin_set_display_mmio_trace);
+     object_class_property_set_description(
+         oc, "display-mmio-trace",
+-        "Trace bounded unassigned accesses in T8120 display MMIO ranges");
++        "Trace bounded selected physical accesses in T8120 display MMIO ranges");
++    object_class_property_add_bool(oc, "display-mmio-trace-test-map",
++                                   darwin_get_display_mmio_trace_test_map,
++                                   darwin_set_display_mmio_trace_test_map);
++    object_class_property_set_description(
++        oc, "display-mmio-trace-test-map",
++        "Map an opt-in synthetic RAM page at DCP solely to validate tracing");
+ 
+     darwin_machine_init(mc);
+ }
+diff --git a/system/memory.c b/system/memory.c
+index a2b50d3db4..0a391600a8 100644
+--- a/system/memory.c
++++ b/system/memory.c
+@@ -1416,7 +1416,11 @@ void openios_display_mmio_trace_enable(void)
+ }
+ 
+ static void openios_display_mmio_trace_access(hwaddr addr, uint64_t value,
+-                                              unsigned size, bool is_write)
++                                              unsigned size, bool is_write,
++                                              const char *result,
++                                              const char *origin,
++                                              const char *region_name,
++                                              hwaddr region_offset)
+ {
+     size_t i;
+ 
+@@ -1444,20 +1448,39 @@ static void openios_display_mmio_trace_access(hwaddr addr, uint64_t value,
+             fprintf(stderr,
+                     "openios-display-mmio: #%-3" PRIu64
+                     " %s addr=0x%" HWADDR_PRIx " size=%u value=0x%" PRIx64
+-                    " range=%s result=unassigned\n",
++                    " range=%s result=%s origin=%s region=%s"
++                    " region-offset=0x%" HWADDR_PRIx "\n",
+                     openios_display_mmio_trace_logged + 1,
+                     is_write ? "write" : "read ", addr, size, value,
+-                    range->name);
++                    range->name, result, origin, region_name, region_offset);
+             openios_display_mmio_trace_logged++;
+         }
+         return;
+     }
+ }
+ 
++void openios_display_mmio_trace_mapped_access(hwaddr addr,
++                                              const char *region_name,
++                                              hwaddr region_offset,
++                                              uint64_t value,
++                                              unsigned size,
++                                              bool is_write,
++                                              const char *origin)
++{
++    /* Unassigned dispatches are reported from the callbacks below. */
++    if (strcmp(region_name, "unassigned") == 0) {
++        return;
++    }
++
++    openios_display_mmio_trace_access(addr, value, size, is_write, "mapped",
++                                      origin, region_name, region_offset);
++}
++
+ static uint64_t unassigned_mem_read(void *opaque, hwaddr addr,
+                                     unsigned size)
+ {
+-    openios_display_mmio_trace_access(addr, 0, size, false);
++    openios_display_mmio_trace_access(addr, 0, size, false, "unassigned",
++                                      "memory-dispatch", "unassigned", addr);
+ #ifdef DEBUG_UNASSIGNED
+     printf("Unassigned mem read " HWADDR_FMT_plx "\n", addr);
+ #endif
+@@ -1467,7 +1490,8 @@ static uint64_t unassigned_mem_read(void *opaque, hwaddr addr,
+ static void unassigned_mem_write(void *opaque, hwaddr addr,
+                                  uint64_t val, unsigned size)
+ {
+-    openios_display_mmio_trace_access(addr, val, size, true);
++    openios_display_mmio_trace_access(addr, val, size, true, "unassigned",
++                                      "memory-dispatch", "unassigned", addr);
+ #ifdef DEBUG_UNASSIGNED
+     printf("Unassigned mem write " HWADDR_FMT_plx " = 0x%"PRIx64"\n", addr, val);
+ #endif
+diff --git a/system/physmem.c b/system/physmem.c
+index c21ea92915..1560e7458f 100644
+--- a/system/physmem.c
++++ b/system/physmem.c
+@@ -58,6 +58,7 @@
+ #include "system/dma.h"
+ #include "system/hostmem.h"
+ #include "system/hw_accel.h"
++#include "system/openios-display-mmio-trace.h"
+ #include "system/xen-mapcache.h"
+ #include "trace.h"
+ 
+@@ -3227,6 +3228,15 @@ static bool flatview_access_allowed(MemoryRegion *mr, MemTxAttrs attrs,
+     return false;
+ }
+ 
++static uint64_t openios_display_mmio_trace_buffer_value(const uint8_t *buf,
++                                                        hwaddr len)
++{
++    uint64_t value = 0;
++
++    memcpy(&value, buf, MIN(len, (hwaddr)sizeof(value)));
++    return value;
++}
++
+ static MemTxResult flatview_write_continue_step(MemTxAttrs attrs,
+                                                 const uint8_t *buf,
+                                                 hwaddr len, hwaddr mr_addr,
+@@ -3288,8 +3298,17 @@ static MemTxResult flatview_write_continue(FlatView *fv, hwaddr addr,
+     const uint8_t *buf = ptr;
+ 
+     for (;;) {
++        hwaddr access_addr = addr;
++        hwaddr access_mr_addr = mr_addr;
++
+         result |= flatview_write_continue_step(attrs, buf, len, mr_addr, &l,
+                                                mr);
++        openios_display_mmio_trace_mapped_access(access_addr,
++                                                  memory_region_name(mr),
++                                                  access_mr_addr,
++                                                  openios_display_mmio_trace_buffer_value(buf, l),
++                                                  l, true,
++                                                  "flatview");
+ 
+         len -= l;
+         buf += l;
+@@ -3380,7 +3399,16 @@ MemTxResult flatview_read_continue(FlatView *fv, hwaddr addr,
+ 
+     fuzz_dma_read_cb(addr, len, mr);
+     for (;;) {
++        hwaddr access_addr = addr;
++        hwaddr access_mr_addr = mr_addr;
++
+         result |= flatview_read_continue_step(attrs, buf, len, mr_addr, &l, mr);
++        openios_display_mmio_trace_mapped_access(access_addr,
++                                                  memory_region_name(mr),
++                                                  access_mr_addr,
++                                                  openios_display_mmio_trace_buffer_value(buf, l),
++                                                  l, false,
++                                                  "flatview");
+ 
+         len -= l;
+         buf += l;
+diff --git a/system/memory_ldst.c.inc b/system/memory_ldst.c.inc
+index a728b7737c..278a2f7005 100644
+--- a/system/memory_ldst.c.inc
++++ b/system/memory_ldst.c.inc
+@@ -50,6 +50,9 @@ uint64_t glue(address_space_ldm_internal, SUFFIX)(ARG1_DECL, MemOp mop,
+     if (result) {
+         *result = r;
+     }
++    openios_display_mmio_trace_mapped_access(addr, memory_region_name(mr),
++                                              addr1, val, size, false,
++                                              "address-space-ldst");
+     if (release_lock) {
+         bql_unlock();
+     }
+@@ -92,6 +95,9 @@ void glue(address_space_stm_internal, SUFFIX)(ARG1_DECL, MemOp mop,
+     if (result) {
+         *result = r;
+     }
++    openios_display_mmio_trace_mapped_access(addr, memory_region_name(mr),
++                                              addr1, val, size, true,
++                                              "address-space-ldst");
+     if (release_lock) {
+         bql_unlock();
+     }
+diff --git a/include/system/openios-display-mmio-trace.h b/include/system/openios-display-mmio-trace.h
+index 453314a181..34d4cc78e8 100644
+--- a/include/system/openios-display-mmio-trace.h
++++ b/include/system/openios-display-mmio-trace.h
+@@ -1,5 +1,5 @@
+ /*
+- * OpeniOS display MMIO tracing for unassigned physical accesses
++ * OpeniOS display MMIO tracing for selected physical accesses
+  *
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+@@ -7,6 +7,18 @@
+ #ifndef SYSTEM_OPENIOS_DISPLAY_MMIO_TRACE_H
+ #define SYSTEM_OPENIOS_DISPLAY_MMIO_TRACE_H
+ 
++#include "exec/hwaddr.h"
++
++#include <stdbool.h>
++#include <stdint.h>
++
+ void openios_display_mmio_trace_enable(void);
++void openios_display_mmio_trace_mapped_access(hwaddr addr,
++                                              const char *region_name,
++                                              hwaddr region_offset,
++                                              uint64_t value,
++                                              unsigned size,
++                                              bool is_write,
++                                              const char *origin);
+ 
+ #endif
