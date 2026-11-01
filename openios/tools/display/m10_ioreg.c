@@ -130,6 +130,34 @@ static void emit_property(io_registry_entry_t entry, const char *property)
     emit(value);
 }
 
+/*
+ * IORegistry properties such as phandles and reg are binary.  Keep the
+ * diagnostic dependency-free, but print their exact bytes instead of
+ * replacing them with question marks.  This is observational only: it does
+ * not create a matching dictionary or request a driver load.
+ */
+static void emit_property_hex(io_registry_entry_t entry, const char *property)
+{
+    unsigned char value[128];
+    uint32_t size = sizeof(value);
+    uint32_t i;
+    static const char hex[] = "0123456789abcdef";
+
+    if (IORegistryEntryGetProperty(entry, property, value, &size) != 0 ||
+        size == 0 || size > sizeof(value)) {
+        emit("<unavailable>");
+        return;
+    }
+
+    for (i = 0; i < size; ++i) {
+        char byte[3];
+        byte[0] = hex[value[i] >> 4];
+        byte[1] = hex[value[i] & 0x0f];
+        byte[2] = '\0';
+        emit(byte);
+    }
+}
+
 static void emit_relations(io_registry_entry_t entry, const char *plane, int is_children)
 {
     io_iterator_t iterator = 0;
@@ -205,6 +233,12 @@ static void inspect_entry_details(io_registry_entry_t entry, const char *plane_c
     emit("  IOProviderClass: "); emit_property(entry, "IOProviderClass"); emit("\n");
     emit("  device_type: "); emit_property(entry, "device_type"); emit("\n");
     emit("  AAPL,phandle: "); emit_property(entry, "AAPL,phandle"); emit("\n");
+    emit("  AAPL,phandle (hex): "); emit_property_hex(entry, "AAPL,phandle"); emit("\n");
+    emit("  iommu-parent (hex): "); emit_property_hex(entry, "iommu-parent"); emit("\n");
+    emit("  reg (hex): "); emit_property_hex(entry, "reg"); emit("\n");
+    emit("  interrupts (hex): "); emit_property_hex(entry, "interrupts"); emit("\n");
+    emit("  page-size (hex): "); emit_property_hex(entry, "page-size"); emit("\n");
+    emit("  vm-base (hex): "); emit_property_hex(entry, "vm-base"); emit("\n");
     emit("  role: "); emit_property(entry, "role"); emit("\n");
 
     emit("  -- IOService Parents & Children --\n");
@@ -252,7 +286,8 @@ int main(void)
                 emit(" compat="); emit_property(object, "compatible");
                 emit("\n");
 
-                if (contains_text(name, "dcp") || contains_text(name, "iop-dcp-nub")) {
+                if (contains_text(name, "dcp") || contains_text(name, "iop-dcp-nub") ||
+                    contains_text(name, "dart") || contains_text(name, "mapper")) {
                     inspect_entry_details(object, "IODeviceTree");
                 }
             }
@@ -275,8 +310,12 @@ int main(void)
                 same_text(name, "RTBuddy") ||
                 same_text(name, "AppleDCPExpert") ||
                 same_text(name, "AppleCLCD2") ||
+                same_text(name, "AppleT8110DART") ||
+                same_text(name, "IODART") ||
                 same_text(name, "dcp") ||
                 same_text(name, "disp0") ||
+                same_text(name, "dart-dcp") ||
+                same_text(name, "mapper-dcp") ||
                 same_text(name, "iop-dcp-nub")) {
                 inspect_entry_details(object, "IOService");
             }
@@ -293,10 +332,13 @@ int main(void)
         static const char *const direct_paths[] = {
             "IODeviceTree:/arm-io/dcp",
             "IODeviceTree:/arm-io/dcp/iop-dcp-nub",
+            "IODeviceTree:/arm-io/dart-dcp",
+            "IODeviceTree:/arm-io/dart-dcp/mapper-dcp",
             "IODeviceTree:/arm-io/dcp0-expert",
             "IODeviceTree:/arm-io/disp0",
             "IOService:/AppleARMPE/arm-io@10F00000/AppleT812xIO/dcp@32C00000",
             "IOService:/AppleARMPE/arm-io@10F00000/AppleT812xIO/dcp@32C00000/AppleASCWrapV6",
+            "IOService:/AppleARMPE/arm-io@10F00000/AppleT812xIO/dart-dcp@3130C000",
         };
         unsigned long i;
         for (i = 0; i < sizeof(direct_paths) / sizeof(direct_paths[0]); ++i) {

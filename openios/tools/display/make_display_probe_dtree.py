@@ -31,6 +31,14 @@ RESTORE_PATHS = {
         ("arm-io", "dart-dispgrt"),
         ("arm-io", "dart-dispgrt", "mapper-dispgrt"),
     ),
+    # Narrow DCP-IOMMU controls.  Keep these separate from "darts" so a
+    # failed display-DART experiment cannot be mistaken for a mapper-dcp
+    # dependency result.
+    "mapper-dcp": (("arm-io", "dart-dcp", "mapper-dcp"),),
+    "dart-dcp": (
+        ("arm-io", "dart-dcp"),
+        ("arm-io", "dart-dcp", "mapper-dcp"),
+    ),
 }
 
 
@@ -93,6 +101,19 @@ def main() -> int:
                 raise RuntimeError(f"input lacks compatible at /{'/'.join(path)}")
             node_at(probe, path).props["compatible"] = compatible
             restored.append(f"/{'/'.join(path)}={compatible!r}")
+            if path[-1].startswith("dart") and "dart-id" not in node_at(probe, path).props:
+                dart_id_map = {
+                    "dart-dcp": "u32:0x0",
+                    "dart-disp0": "u32:0x1",
+                    "dart-dispgrt": "u32:0x2",
+                    "dart-scaler": "u32:0x3",
+                }
+                dart_id = dart_id_map.get(path[-1], f"u32:0x{len(restored) & 0xff:x}")
+                node_at(probe, path).props["dart-id"] = dart_id
+                restored.append(f"/{'/'.join(path)}/dart-id='{dart_id}'")
+
+    if "random-seed" in probe["chosen"].props:
+        probe["chosen"].props["random-seed"] = bytes([((i * 37) % 254) + 1 for i in range(256)])
 
     # dt.fixup() removes SGX.  Keep it that way: this probe is not a GPU probe.
     if "sgx" in probe["arm-io"]:

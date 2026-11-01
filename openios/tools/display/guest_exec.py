@@ -78,9 +78,20 @@ def run_guest_session(qemu_cmd, upload_binary=None, guest_dest="/tmp/test_bin",
                 except OSError:
                     break
 
-        if not prompt_reached and proc.poll() is None:
-            status_str = "BOOT_TIMEOUT"
-            print(f"[-] Timed out after {boot_timeout}s waiting for guest bash prompt", file=sys.stderr)
+        if not prompt_reached:
+            # A QEMU startup failure can arrive on the PTY immediately after a
+            # poll.  Give it one short, bounded reap window before labelling it
+            # a guest boot timeout; otherwise a missing/invalid DT is wrongly
+            # reported as a DART or kernel hang.
+            if proc.poll() is None:
+                time.sleep(0.2)
+            ret = proc.poll()
+            if ret is not None:
+                status_str = f"QEMU_EXIT_EARLY (exit code {ret})"
+                print(f"[-] {status_str}", file=sys.stderr)
+            else:
+                status_str = "BOOT_TIMEOUT"
+                print(f"[-] Timed out after {boot_timeout}s waiting for guest bash prompt", file=sys.stderr)
 
         if prompt_reached:
             print(f"[+] bash-5.3# prompt reached in {time.time() - boot_start:.2f}s!", file=sys.stderr)
@@ -222,6 +233,7 @@ def main():
     parser.add_argument("--boot-timeout", type=int, default=45)
     parser.add_argument("--cmd-timeout", type=int, default=30)
     parser.add_argument("--timeout", type=int, default=45, help="legacy alias for boot-timeout")
+    parser.add_argument("--log", default="", help="write complete serial/PTy capture to this host path")
     args = parser.parse_args()
 
     boot_to = args.boot_timeout if args.boot_timeout != 45 else args.timeout
@@ -246,6 +258,9 @@ def main():
                                       command_to_run=args.cmd,
                                       boot_timeout=boot_to,
                                       cmd_timeout=args.cmd_timeout)
+    if args.log:
+        with open(args.log, "wb") as log_file:
+            log_file.write(log)
     sys.stdout.write(log.decode('utf-8', errors='replace'))
     sys.stdout.flush()
     if not ok:

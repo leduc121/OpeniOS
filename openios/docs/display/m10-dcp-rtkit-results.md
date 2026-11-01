@@ -174,9 +174,9 @@ The normal M1 control with all tracing and test-map properties omitted also
 reached `bash-5.3#`; `uname`, `id`, and the marker
 `OPENIOS_M10_2_M1_STATUS=0` succeeded.
 
-## M10.2 AppleASCWrapV6 lifecycle resolution
+## M10.2 AppleASCWrapV6 lifecycle analysis (superseded)
 
-**PASS for lifecycle determination; root cause identified.** Through full Mach-O
+**PARTIAL — static analysis only; runtime root cause not identified.** Through full Mach-O
 disassembly of `com.apple.driver.AppleA7IOP-ASCWrap-v6` and
 `com.apple.driver.AppleA7IOP` from the release 23G71 Boot KC, cross-referenced
 with controlled runtime execution with `io=0x16`:
@@ -185,7 +185,7 @@ with controlled runtime execution with `io=0x16`:
    Neither `AppleASCWrapV6` nor `AppleA7IOP` overrides `IOService::probe()`.
    They inherit the base implementation which unconditionally returns `this`.
 
-2. **`start()` contract and execution**:
+2. **`start()` contract (static)**:
    `AppleASCWrapV6` inherits `AppleA7IOP::start(IOService *provider)`.
    Its full execution flow was mapped:
    - Validates `provider` is `AppleARMIODevice` (panic if NULL).
@@ -199,7 +199,7 @@ with controlled runtime execution with `io=0x16`:
    - Calls `initialize()`, which dispatches virtually to
      `AppleASCWrapV6::initialize()`.
 
-3. **`AppleASCWrapV6::initialize()` execution**:
+3. **`AppleASCWrapV6::initialize()` contract (static)**:
    - Maps Range 1 (`dcp.1` at 0x232850000, size 0x4000) via
      `provider->mapDeviceMemoryWithIndex(1, 0)` and asserts `_coreRegisterMap` and
      `_coreMappedRegs` are non-null.
@@ -214,7 +214,7 @@ with controlled runtime execution with `io=0x16`:
    expected characteristic of the driver's initialization phase, not evidence of
    failure.
 
-5. **Child nub publication loop and root cause of missing `AppleA7IOPNub`**:
+5. **Child nub publication loop (static)**:
    Immediately after `initialize()` returns `true`, `AppleA7IOP::start` calls
    `createChildNubs(provider)`:
    - Queries `provider->getChildIterator(gIODTPlane)`.
