@@ -1,0 +1,89 @@
+/* Modern Dark Theme for OpeniOS Simulator — Floating iPhone Window */
+
+/* Transparent root window for floating simulator */
+window.floating-window {
+    background-color: transparent;
+    background: transparent;
+}
+
+window.logs-dialog-window {
+    background-color: #141519;
+    color: #e5e5ea;
+}
+
+/* Compact Floating Titlebar Pill matching Apple's Simulator */
+.compact-titlebar {
+    background-color: rgba(30, 31, 35, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9px;
+    padding: 4px 10px;
+}
+
+/* Title & Status Labels */
+.titlebar-title {
+    color: #f2f2f7;
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: -0.2px;
+}
+
+.titlebar-status {
+    color: #98989f;
+    font-size: 12px;
+    font-weight: 400;
+}
+
+/* Minimal Action Icons */
+button.titlebar-icon-btn {
+    background-color: rgba(255, 255, 255, 0.08);
+    background-image: none;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: none;
+    color: #c7c7cc;
+    padding: 2px 6px;
+    border-radius: 5px;
+    font-size: 12px;
+}
+
+button.titlebar-icon-btn:hover {
+    background-color: rgba(255, 255, 255, 0.16);
+    color: #ffffff;
+}
+
+/* Sleek Dark Context Menu */
+menu {
+    background-color: #1c1d23;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    padding: 4px;
+    color: #e5e5ea;
+}
+
+menuitem {
+    padding: 5px 12px;
+    border-radius: 5px;
+    font-size: 12px;
+}
+
+menuitem:hover {
+    background-color: #007aff;
+    color: #ffffff;
+}
+
+separator {
+    background-color: rgba(255, 255, 255, 0.1);
+    min-height: 1px;
+    margin: 4px 0;
+}
+
+/* Standalone Dev Server Console Dialog */
+textview, textview text {
+    background-color: #0c0d10;
+    color: #38ef7d;
+}
+
+.console-text {
+    background-color: #0c0d10;
+    color: #38ef7d;
+    padding: 8px;
+}

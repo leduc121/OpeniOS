@@ -1,0 +1,25 @@
+:root {
+  --sat: var(--openios-safe-area-top, 59px);
+  --sab: var(--openios-safe-area-bottom, 34px);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: #000000;
+  color: #ffffff;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding-top: calc(var(--sat) + 10px);
+  padding-bottom: calc(var(--sab) + 10px);
+  padding-left: 16px;
+  padding-right: 16px;
+  overflow-x: hidden;
+}

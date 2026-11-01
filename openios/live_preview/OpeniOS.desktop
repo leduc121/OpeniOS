@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OpeniOS Simulator
+GenericName=iPhone Simulator & Live Preview
+Comment=Standalone iPhone Simulator UI with Live Preview for Ubuntu
+Exec=env PYTHONPATH=/home/quangduc/Code/OpeniOS /usr/bin/python3 /home/quangduc/Code/OpeniOS/openios/live_preview/main.py %f
+Path=/home/quangduc/Code/OpeniOS
+Icon=phone
+Terminal=false
+Categories=Development;IDE;
+StartupNotify=true
+StartupWMClass=OpeniOS
+Keywords=iPhone;iOS;Simulator;React;Vite;Expo;Flutter;Preview;

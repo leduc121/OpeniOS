@@ -25,3 +25,8 @@ GTAGS
 third_party/*/
 build-*/
 firmware/
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.vite/
