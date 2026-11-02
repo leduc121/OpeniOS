@@ -20,4 +20,4 @@ Only items marked VERIFIED were checked against source or real output.
 
 ## Build status
 - Inferno baseline: NOT YET BUILT
-- qemu-sptm baseline: NOT YET BUILT
+
